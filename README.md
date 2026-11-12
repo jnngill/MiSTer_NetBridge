@@ -109,8 +109,9 @@ keeps its four RX buffers in the shared area itself.
 | `tools/make_db.py` | writes `db.json` for Downloader |
 
 **Releasing:** after changing anything in `Scripts/`, run
-`python3 tools/make_db.py` and commit `db.json` with it. CI fails if they
-don't match.
+`python3 tools/make_db.py` and commit `db.json` with it. Before pushing,
+`sh tests/run.sh` and `python3 tools/make_db.py --check` should both pass
+(Downloader refuses a file whose hash doesn't match `db.json`).
 
 ## License
 
