@@ -91,7 +91,10 @@ short:
   own DDR traffic.
 
 **The protocol:** [docs/PROTOCOL.md](docs/PROTOCOL.md) gives the shared-area
-layout and handshake, if you would rather write your own FPGA side.
+layout and handshake, if you would rather write your own FPGA side. The C65
+core does this: its MEGA65 Ethernet controller
+([`rtl/m65_eth.sv`](https://github.com/jnngill/C65_MiSTer/blob/master/rtl/m65_eth.sv))
+keeps its four RX buffers in the shared area itself.
 
 | File | |
 |---|---|
