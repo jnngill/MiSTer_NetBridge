@@ -64,7 +64,9 @@ helper only reads the area until a core plainly serves it:
 - **Version 2.** Byte 0 is `0xE7`, byte 1 is at least 2, the signature is in
   place, and the heartbeat byte has changed within the last second. A change
   of core (`/tmp/CORENAME`) also counts: whatever is in memory is treated as
-  stale until the heartbeat moves again. A core that stops, or a different
+  stale until the heartbeat moves again. A beat is a change the helper sees
+  between two of its own looks, never the first value it finds, so a helper
+  that starts or restarts does not count leftover memory as live. A core that stops, or a different
   core that overwrites the area, stops the helper within a second. Leftover
   memory never starts it.
 - **Version 1.** Byte 0 is `0xE7`, byte 1 is 1, and the loaded core is `C65`

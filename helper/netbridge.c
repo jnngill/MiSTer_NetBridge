@@ -144,7 +144,7 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "netbridge: %s, shared area at 0x%08X\n", ifname, SHM_PHYS);
 
 	char core[64] = "", prev_core[64] = "";
-	int active = 0, legacy = 0, beat_seen = 0;
+	int active = 0, legacy = 0, beat_seen = 0, had_sig = 0;
 	uint8_t last_beat = 0;
 	long last_beat_ms = 0, last_name_ms = 0;
 	while (!quit) {
@@ -160,13 +160,22 @@ int main(int argc, char **argv) {
 				/* a new core: whatever is in the area is stale until it beats */
 				strcpy(prev_core, core);
 				beat_seen = 0;
+				if (verbose) fprintf(stderr, "netbridge: core %s\n", core[0] ? core : "(none)");
 				legacy = legacy_core(core);
 			}
 		}
-		if (sig_ok() && shm[S_BEAT] != last_beat) {
-			last_beat = shm[S_BEAT];
-			last_beat_ms = now;
-			beat_seen = 1;
+		/* a beat is a change seen between two looks at a signed area, never
+		 * the first value seen: memory left over from a core that has gone
+		 * keeps its signature but never changes */
+		{
+			int sig = sig_ok();
+			uint8_t b = shm[S_BEAT];
+			if (sig && had_sig && b != last_beat) {
+				last_beat_ms = now;
+				beat_seen = 1;
+			}
+			last_beat = b;
+			had_sig = sig;
 		}
 		int was = active;
 		if (shm[S_MAGIC] != 0xE7) active = 0;
@@ -174,8 +183,8 @@ int main(int argc, char **argv) {
 		else active = legacy && shm[S_VER] == 1;
 		if (active != was) {
 			if (!active) qn = 0;
-			if (verbose) fprintf(stderr, "netbridge: %s %s (area version %d)\n",
-			                     core, active ? "attached" : "detached", shm[S_VER]);
+			if (verbose) fprintf(stderr, "netbridge: area %s (version %d)\n",
+			                     active ? "attached" : "detached", shm[S_VER]);
 		}
 
 		/* everything that arrived: keep what the core would accept */
