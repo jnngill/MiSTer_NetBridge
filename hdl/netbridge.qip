@@ -1,0 +1,4 @@
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) netbridge.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) netbridge_ne2000.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) netbridge_ddram_arb.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) netbridge_dpram.sv]

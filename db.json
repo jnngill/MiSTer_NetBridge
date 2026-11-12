@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "db_id": "mister_netbridge",
+  "timestamp": 1794488634,
+  "base_files_url": "https://raw.githubusercontent.com/jnngill/MiSTer_NetBridge/main/",
+  "files": {
+    "Scripts/netbridge.sh": {
+      "hash": "9cd3362ab0fbd10c5dbf5a4e879fa869",
+      "size": 4104
+    },
+    "Scripts/.config/netbridge/netbridge": {
+      "hash": "550f95e65627e429ec2306d855ceed7c",
+      "size": 36788
+    }
+  },
+  "folders": {
+    "Scripts": {},
+    "Scripts/.config": {},
+    "Scripts/.config/netbridge": {}
+  }
+}
