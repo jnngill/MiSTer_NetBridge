@@ -6,8 +6,15 @@
  * and this program moves Ethernet frames between it and the MiSTer's wired
  * port with a raw packet socket. The emulated machine is then a machine of
  * its own on the LAN, with its own MAC address: DHCP, the internet and other
- * machines work. One thing does not: the MiSTer's own Linux cannot talk to
- * it, because frames sent out of eth0 do not come back in.
+ * machines work.
+ *
+ * The MiSTer's own Linux would not see the guest that way (frames sent out
+ * of eth0 do not come back in), so the helper also links the two itself: a
+ * point-to-point interface, nbhost, carries IPv4 between Linux and the
+ * guest. The helper answers the guest's ARP for the MiSTer's address with
+ * eth0's MAC, passes the guest's packets for that MAC into nbhost, and
+ * routes the guest's address (learned from what it sends) through nbhost.
+ * Nothing about eth0 changes; -n leaves the link out.
  *
  * Other cores may use that DDR for anything, so this only touches the area
  * while a core is plainly serving it (docs/PROTOCOL.md):
@@ -16,7 +23,9 @@
  *   version 1 (the C65 and z486 cores' first releases): the loaded core
  *     (/tmp/CORENAME) is one of those.
  *
- * usage: netbridge [-v] [interface]   (default eth0; runs in the foreground)
+ * usage: netbridge [-v] [-n] [interface]   (default eth0; runs in the foreground)
+ *   -v  log core changes and the area attaching and detaching
+ *   -n  no host link (nbhost)
  *
  * build: zig cc -target arm-linux-musleabihf -O2 -s -static -o netbridge netbridge.c
  */
@@ -24,8 +33,10 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <net/route.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
+#include <linux/if_tun.h>
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
 #include <poll.h>
@@ -63,13 +74,152 @@
 #define S_TXBUF   0x800
 #define S_RXBUF   0x1000
 
+#define HOST_IF   "nbhost"
+
 static volatile uint8_t *shm;
 static volatile int quit;
 static int verbose;
 static unsigned char q[QMAX][2048];
 static int qlen[QMAX], qhead, qn;
 
+/* the host link */
+static int tun = -1, ctl = -1;
+static uint8_t host_mac[6];
+static uint32_t host_ip, guest_ip;      /* network order; 0 = unknown */
+
 static void on_signal(int s) { (void)s; quit = 1; }
+
+/* a frame for the core, if the queue has room (else the oldest goes) */
+static void enqueue(const unsigned char *f, int n) {
+	if (qn == QMAX) { qhead = (qhead + 1) % QMAX; qn--; }
+	int t = (qhead + qn) % QMAX;
+	memcpy(q[t], f, n);
+	if (n < 60) { memset(q[t] + n, 0, 60 - n); n = 60; }
+	qlen[t] = n;
+	qn++;
+}
+
+static void ip_str(uint32_t ip, char *b) {
+	const uint8_t *a = (const uint8_t *)&ip;
+	sprintf(b, "%d.%d.%d.%d", a[0], a[1], a[2], a[3]);
+}
+
+static int host_route(unsigned long req, uint32_t ip) {
+	struct rtentry rt;
+	memset(&rt, 0, sizeof rt);
+	struct sockaddr_in *d = (struct sockaddr_in *)&rt.rt_dst;
+	struct sockaddr_in *m = (struct sockaddr_in *)&rt.rt_genmask;
+	d->sin_family = m->sin_family = AF_INET;
+	d->sin_addr.s_addr = ip;
+	m->sin_addr.s_addr = 0xFFFFFFFFu;
+	rt.rt_flags = RTF_UP | RTF_HOST;
+	rt.rt_dev = (char *)HOST_IF;
+	return ioctl(ctl, req, &rt);
+}
+
+/* the guest's address changed (0: forget it) */
+static void set_guest_ip(uint32_t ip) {
+	if (ip == guest_ip) return;
+	char b[16];
+	if (guest_ip) host_route(SIOCDELRT, guest_ip);
+	guest_ip = ip;
+	if (!ip) return;
+	ip_str(ip, b);
+	if (host_route(SIOCADDRT, ip) < 0 && errno != EEXIST)
+		fprintf(stderr, "netbridge: route to %s: %s\n", b, strerror(errno));
+	else if (verbose)
+		fprintf(stderr, "netbridge: the MiSTer reaches the guest at %s\n", b);
+}
+
+static void host_link_open(const char *ifname) {
+	struct ifreq ifr;
+	ctl = socket(AF_INET, SOCK_DGRAM, 0);
+	memset(&ifr, 0, sizeof ifr);
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+	if (ctl < 0 || ioctl(ctl, SIOCGIFHWADDR, &ifr) < 0) { perror("host link: MAC"); return; }
+	memcpy(host_mac, ifr.ifr_hwaddr.sa_data, 6);
+
+	tun = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
+	if (tun < 0) { perror("host link: /dev/net/tun"); return; }
+	memset(&ifr, 0, sizeof ifr);
+	ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+	strncpy(ifr.ifr_name, HOST_IF, IFNAMSIZ - 1);
+	if (ioctl(tun, TUNSETIFF, &ifr) < 0) {
+		perror("host link: " HOST_IF);
+		close(tun); tun = -1; return;
+	}
+	/* IPv4 only: no IPv6 link-local chatter on it */
+	int f = open("/proc/sys/net/ipv6/conf/" HOST_IF "/disable_ipv6", O_WRONLY);
+	if (f >= 0) { if (write(f, "1", 1) < 0) {} close(f); }
+	if (ioctl(ctl, SIOCGIFFLAGS, &ifr) == 0) {
+		ifr.ifr_flags |= IFF_UP;
+		if (ioctl(ctl, SIOCSIFFLAGS, &ifr) < 0) perror("host link: up");
+	}
+}
+
+/* eth0's IPv4 address, which DHCP may change */
+static void read_host_ip(const char *ifname) {
+	struct ifreq ifr;
+	memset(&ifr, 0, sizeof ifr);
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+	ifr.ifr_addr.sa_family = AF_INET;
+	host_ip = ioctl(ctl, SIOCGIFADDR, &ifr) == 0 ?
+		((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr : 0;
+}
+
+static int usable_ip(uint32_t ip) {
+	const uint8_t *a = (const uint8_t *)&ip;
+	return ip && ip != host_ip && a[0] != 127 && a[0] < 224;
+}
+
+/* a frame from the guest. Returns 1 if it was for the MiSTer itself and
+ * has been dealt with here, 0 if it goes out on the wire. */
+static int guest_to_host(const unsigned char *f, int len, const uint8_t *gmac) {
+	if (tun < 0 || len < 14) return 0;
+	int type = f[12] << 8 | f[13];
+	uint32_t ip;
+	if (!memcmp(f + 6, gmac, 6)) {             /* learn the guest's address */
+		if (type == 0x0806 && len >= 42) { memcpy(&ip, f + 28, 4); if (usable_ip(ip)) set_guest_ip(ip); }
+		if (type == 0x0800 && len >= 34) { memcpy(&ip, f + 26, 4); if (usable_ip(ip)) set_guest_ip(ip); }
+	}
+	if (!host_ip) return 0;
+	/* "who has the MiSTer's address?": eth0's MAC, answered here (Linux
+	 * never sees the request, which went out of eth0) */
+	if (type == 0x0806 && len >= 42 && f[20] == 0 && f[21] == 1 && !memcmp(f + 38, &host_ip, 4)) {
+		unsigned char r[60];
+		memset(r, 0, sizeof r);
+		memcpy(r, f + 22, 6);                  /* to the asker */
+		memcpy(r + 6, host_mac, 6);
+		r[12] = 0x08; r[13] = 0x06;
+		r[14] = 0; r[15] = 1; r[16] = 0x08; r[17] = 0; r[18] = 6; r[19] = 4;
+		r[20] = 0; r[21] = 2;
+		memcpy(r + 22, host_mac, 6);
+		memcpy(r + 28, &host_ip, 4);
+		memcpy(r + 32, f + 22, 10);            /* the asker's MAC and address */
+		enqueue(r, 60);
+		return 1;
+	}
+	if (memcmp(f, host_mac, 6)) return 0;      /* not for the MiSTer */
+	if (type == 0x0800 && len >= 34) {
+		int tot = f[16] << 8 | f[17];
+		if (tot > len - 14) tot = len - 14;
+		if (write(tun, f + 14, tot) < 0 && verbose) perror("host link: write");
+	}
+	return 1;                                  /* the wire would not bring it back */
+}
+
+/* IPv4 packets Linux routed to the guest */
+static void host_to_guest(const uint8_t *gmac) {
+	unsigned char f[2048];
+	int n;
+	while ((n = read(tun, f + 14, sizeof f - 18)) > 0) {
+		if (n < 20 || (f[14] >> 4) != 4) continue;
+		memcpy(f, gmac, 6);
+		memcpy(f + 6, host_mac, 6);
+		f[12] = 0x08; f[13] = 0x00;
+		enqueue(f, n + 14);
+	}
+}
 
 static long now_ms(void) {
 	struct timespec t;
@@ -108,8 +258,10 @@ static uint32_t crc32(const unsigned char *d, int n) {
 
 int main(int argc, char **argv) {
 	const char *ifname = "eth0";
+	int link = 1;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-v")) verbose = 1;
+		else if (!strcmp(argv[i], "-n")) link = 0;
 		else ifname = argv[i];
 	}
 	signal(SIGTERM, on_signal);
@@ -141,17 +293,23 @@ int main(int argc, char **argv) {
 		ifr.ifr_data = (void *)&ev;
 		if (ioctl(s, SIOCETHTOOL, &ifr) < 0) perror("GRO off");
 	}
-	fprintf(stderr, "netbridge: %s, shared area at 0x%08X\n", ifname, SHM_PHYS);
+	if (link) host_link_open(ifname);
+	fprintf(stderr, "netbridge: %s, shared area at 0x%08X%s\n", ifname, SHM_PHYS,
+	        tun >= 0 ? ", host link " HOST_IF : "");
 
 	char core[64] = "", prev_core[64] = "";
 	int active = 0, legacy = 0, beat_seen = 0, had_sig = 0;
 	uint8_t last_beat = 0;
-	long last_beat_ms = 0, last_name_ms = 0;
+	long last_beat_ms = 0, last_name_ms = 0, last_ip_ms = -1000;
 	while (!quit) {
-		struct pollfd p = { .fd = s, .events = POLLIN };
-		poll(&p, 1, 1);
+		struct pollfd p[2] = { { .fd = s, .events = POLLIN }, { .fd = tun, .events = POLLIN } };
+		poll(p, tun >= 0 ? 2 : 1, 1);
 		long now = now_ms();
 
+		if (tun >= 0 && now - last_ip_ms >= 1000) {
+			last_ip_ms = now;
+			read_host_ip(ifname);
+		}
 		/* which core, and is it serving the area */
 		if (now - last_name_ms >= 100) {
 			last_name_ms = now;
@@ -182,7 +340,7 @@ int main(int argc, char **argv) {
 		else if (shm[S_VER] >= 2) active = beat_seen && sig_ok() && now - last_beat_ms < 1000;
 		else active = legacy && shm[S_VER] == 1;
 		if (active != was) {
-			if (!active) qn = 0;
+			if (!active) { qn = 0; set_guest_ip(0); }
 			if (verbose) fprintf(stderr, "netbridge: area %s (version %d)\n",
 			                     active ? "attached" : "detached", shm[S_VER]);
 		}
@@ -203,11 +361,13 @@ int main(int argc, char **argv) {
 			int mc = (buf[0] & 1) && !bc;
 			int me = !memcmp(buf, mac, 6);
 			if ((filter & 0x01) && !me && !(bc && (filter & 0x10)) && !(mc && (filter & 0x20))) continue;
-			if (qn == QMAX) { qhead = (qhead + 1) % QMAX; qn--; }  /* drop the oldest */
-			int t = (qhead + qn) % QMAX;
-			memcpy(q[t], buf, n);
-			qlen[t] = n;
-			qn++;
+			enqueue(buf, n);
+		}
+		if (tun >= 0) {
+			uint8_t gmac[6];
+			for (int i = 0; i < 6; i++) gmac[i] = shm[S_MAC + i];
+			if (active && (shm[S_FLAGS] & 1)) host_to_guest(gmac);
+			else while (read(tun, buf, sizeof buf) > 0) {}   /* nobody to take it */
 		}
 		if (!active) continue;
 		shm[S_ALIVE] = 0xA5;
@@ -221,7 +381,10 @@ int main(int argc, char **argv) {
 			unsigned char f[2048];
 			for (int i = 0; i < len; i++) f[i] = shm[S_TXBUF + i];
 			if (len < 60) { memset(f + len, 0, 60 - len); len = 60; }
-			sendto(s, f, len, 0, (struct sockaddr *)&sll, sizeof sll);
+			uint8_t gmac[6];
+			for (int i = 0; i < 6; i++) gmac[i] = shm[S_MAC + i];
+			if (!guest_to_host(f, len, gmac))
+				sendto(s, f, len, 0, (struct sockaddr *)&sll, sizeof sll);
 			__sync_synchronize();
 			shm[S_TXDONE] = tx_seq;
 		}
@@ -249,5 +412,6 @@ int main(int argc, char **argv) {
 		}
 	}
 	if (active) shm[S_ALIVE] = 0;
+	set_guest_ip(0);
 	return 0;
 }

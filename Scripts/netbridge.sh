@@ -8,16 +8,17 @@
 # small shared area of DDR memory and the netbridge program, running in the
 # background, passes them to and from eth0. The emulated machine appears on
 # your network as a machine of its own, with its own MAC address, so it gets
-# its own address from your router's DHCP. The MiSTer's own Linux cannot
-# reach it this way (everything else on the network, and the internet, can).
+# its own address from your router's DHCP. The MiSTer itself reaches it too,
+# through a small link interface (nbhost) the bridge sets up.
 # It needs the network cable; Wi-Fi does not work for this.
 #
 # Run this from the Scripts menu to turn the bridge on: it starts now and at
 # every boot. Run it again to turn it off. From a shell:
 #   netbridge.sh on | off | status
 #
-# Another interface: put NET_IF=eth1 (for example) into
-# /media/fat/Scripts/.config/netbridge/netbridge.conf
+# Settings go into /media/fat/Scripts/.config/netbridge/netbridge.conf:
+#   NET_IF=eth1      another network port
+#   HOST_LINK=no     no nbhost link between the MiSTer and the guest
 #
 # https://github.com/jnngill/MiSTer_NetBridge
 
@@ -31,7 +32,10 @@ STARTUP=/media/fat/linux/user-startup.sh
 LINE='[ -f /media/fat/Scripts/netbridge.sh ] && /bin/sh /media/fat/Scripts/netbridge.sh daemon &'
 
 NET_IF=eth0
+HOST_LINK=yes
 [ -f "$CONF" ] && . "$CONF"
+OPTS=-v
+[ "$HOST_LINK" = no ] && OPTS="-v -n"
 
 daemon_pids() {
 	ps | grep "netbridge.sh daemon" | grep -v grep | awk '{print $1}'
@@ -110,7 +114,7 @@ daemon)
 	while :; do
 		chmod +x "$BIN" 2>/dev/null
 		t=$(mtime "$BIN")
-		"$BIN" -v "$NET_IF" >> "$LOG" 2>&1 &
+		"$BIN" $OPTS "$NET_IF" >> "$LOG" 2>&1 &
 		pid=$!
 		while kill -0 "$pid" 2>/dev/null; do
 			sleep 5

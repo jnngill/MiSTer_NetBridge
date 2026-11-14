@@ -1,16 +1,16 @@
 {
   "v": 1,
   "db_id": "mister_netbridge",
-  "timestamp": 1794491156,
+  "timestamp": 1794673780,
   "base_files_url": "https://raw.githubusercontent.com/jnngill/MiSTer_NetBridge/main/",
   "files": {
     "Scripts/netbridge.sh": {
-      "hash": "9cd3362ab0fbd10c5dbf5a4e879fa869",
-      "size": 4104
+      "hash": "babd91cf41803f626e13fc5f5f418c04",
+      "size": 4229
     },
     "Scripts/.config/netbridge/netbridge": {
-      "hash": "194a367539456057b4d5bdf9fc08e61b",
-      "size": 37012
+      "hash": "81a100756cff42048e665d15d2b35b15",
+      "size": 40588
     }
   },
   "folders": {

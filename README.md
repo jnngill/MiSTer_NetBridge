@@ -69,9 +69,15 @@ NetBridge serves the C65 just the same.
 
 - **Cable only.** The MiSTer must be on the network cable. Wi-Fi cannot do
   this.
-- **The MiSTer can't reach the guest.** The MiSTer's own Linux cannot talk to
-  the emulated machine (frames sent out of `eth0` do not come back in).
-  Everything else on your network can.
+- **The MiSTer reaches the guest too.** Frames sent out of `eth0` never come
+  back in to the MiSTer's own Linux, so the helper links the two itself: a
+  small point-to-point interface, `nbhost`, carries IPv4 between them. The
+  helper answers the guest's ARP for the MiSTer's address and routes the
+  guest's address (learned from its traffic) through `nbhost`. So the guest
+  can fetch files from a server on the MiSTer, and the MiSTer can connect to
+  the guest. `eth0`, its address and routes are not touched, and nothing
+  needs a bridge in the kernel. To leave it out, put `HOST_LINK=no` into
+  `netbridge.conf` (below). IPv4 only.
 - **Another interface.** Put `NET_IF=eth1` (for example) into
   `/media/fat/Scripts/.config/netbridge/netbridge.conf`.
 - **GRO is turned off.** The helper turns off Generic Receive Offload on the
